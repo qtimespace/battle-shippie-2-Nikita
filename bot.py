@@ -7,8 +7,18 @@ import re
 import string
 from urllib.parse import quote
 import asyncpg
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,8 +38,11 @@ if not DATABASE_URL:
 
 db_pool: asyncpg.Pool = None  # type: ignore
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+bot = Bot(
+    token=API_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+dp = Dispatcher()
 
 FIELD = 10
 LETTERS = "ABCDEFGHIJ"
@@ -42,18 +55,17 @@ BOT_USERNAME = None
 
 def kb_menu(state=None):
     """Контекстная reply-клавиатура с командами."""
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(types.KeyboardButton("📋 Меню"))
+    rows = [[KeyboardButton(text="📋 Меню")]]
     if state == "PLACING":
-        kb.row(types.KeyboardButton("/replace"), types.KeyboardButton("/ready"))
-        kb.row(types.KeyboardButton("/surrender"))
+        rows.append([KeyboardButton(text="/replace"), KeyboardButton(text="/ready")])
+        rows.append([KeyboardButton(text="/surrender")])
     elif state == "PLAYING":
-        kb.row(types.KeyboardButton("/surrender"))
-        kb.row(types.KeyboardButton("/help"))
+        rows.append([KeyboardButton(text="/surrender")])
+        rows.append([KeyboardButton(text="/help")])
     else:
-        kb.row(types.KeyboardButton("/new"))
-        kb.row(types.KeyboardButton("/help"))
-    return kb
+        rows.append([KeyboardButton(text="/new")])
+        rows.append([KeyboardButton(text="/help")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def kb_invite(code):
@@ -64,9 +76,9 @@ def kb_invite(code):
         "https://t.me/share/url?"
         f"url={quote(deep, safe='')}&text={quote(text, safe='')}"
     )
-    m = types.InlineKeyboardMarkup(row_width=1)
-    m.add(types.InlineKeyboardButton("📨 Позвать друга", url=share))
-    return m
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📨 Позвать друга", url=share)]]
+    )
 
 
 def _user_state(uid):
@@ -460,9 +472,7 @@ async def send_boards(game, user_id, prefix="", reply_markup=None):
             f"<i>Легенда:</i> <code>■</code> корабль, <code>✕</code> попадание, "
             f"<code>○</code> промах, <code>·</code> пусто"
         )
-    await bot.send_message(
-        user_id, text, parse_mode="HTML", reply_markup=reply_markup
-    )
+    await bot.send_message(user_id, text, reply_markup=reply_markup)
 
 
 def other(game, user_id):
@@ -500,35 +510,34 @@ HELP_TEXT = (
 )
 
 
-async def _send_help(message):
+async def _send_help(message: Message):
     await message.reply(
         HELP_TEXT,
-        parse_mode="HTML",
         reply_markup=kb_menu(_user_state(message.from_user.id)),
     )
 
 
-@dp.message_handler(commands=["start"])
-async def cmd_start(message: types.Message):
-    arg = (message.get_args() or "").strip().upper()
+@dp.message(CommandStart())
+async def cmd_start(message: Message, command: CommandObject):
+    arg = (command.args or "").strip().upper()
     if arg and CODE_RE.match(arg):
         await _try_join(message, arg)
         return
     await _send_help(message)
 
 
-@dp.message_handler(commands=["help"])
-async def cmd_help(message: types.Message):
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
     await _send_help(message)
 
 
-@dp.message_handler(lambda m: (m.text or "").strip() == "📋 Меню")
-async def menu_button(message: types.Message):
+@dp.message(F.text == "📋 Меню")
+async def menu_button(message: Message):
     await _send_help(message)
 
 
-@dp.message_handler(commands=["new"])
-async def cmd_new(message: types.Message):
+@dp.message(Command("new"))
+async def cmd_new(message: Message):
     uid = message.from_user.id
     if uid in user_game:
         await message.reply(
@@ -565,13 +574,12 @@ async def cmd_new(message: types.Message):
         f"📨 <b>Пригласи соперника</b>\n"
         f"Кнопка ниже откроет список контактов Telegram.\n\n"
         f"Ссылка для ручной отправки:\n{deep}",
-        parse_mode="HTML",
         reply_markup=kb_invite(code),
         disable_web_page_preview=True,
     )
 
 
-async def _try_join(message: types.Message, code: str):
+async def _try_join(message: Message, code: str):
     """Общая join-логика: из /join <код> и из deep-link /start <код>."""
     uid = message.from_user.id
     if uid in user_game:
@@ -616,7 +624,6 @@ async def _try_join(message: types.Message, code: str):
     log.info("player %s joined code=%s", uid, code)
     await message.reply(
         "✅ <b>Ты в игре!</b>\n/replace — перекинуть расстановку\n/ready — готов к бою",
-        parse_mode="HTML",
         reply_markup=kb_menu("PLACING"),
     )
     await send_boards(game, uid, "Твоя расстановка:")
@@ -627,20 +634,20 @@ async def _try_join(message: types.Message, code: str):
     )
 
 
-@dp.message_handler(commands=["join"])
-async def cmd_join(message: types.Message):
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
+@dp.message(Command("join"))
+async def cmd_join(message: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    if not arg:
         await message.reply(
             "Формат: /join КОД",
             reply_markup=kb_menu(_user_state(message.from_user.id)),
         )
         return
-    await _try_join(message, parts[1])
+    await _try_join(message, arg)
 
 
-@dp.message_handler(commands=["replace"])
-async def cmd_replace(message: types.Message):
+@dp.message(Command("replace"))
+async def cmd_replace(message: Message):
     uid = message.from_user.id
     code = user_game.get(uid)
     if not code:
@@ -670,8 +677,8 @@ async def cmd_replace(message: types.Message):
     )
 
 
-@dp.message_handler(commands=["ready"])
-async def cmd_ready(message: types.Message):
+@dp.message(Command("ready"))
+async def cmd_ready(message: Message):
     uid = message.from_user.id
     code = user_game.get(uid)
     if not code:
@@ -706,13 +713,11 @@ async def cmd_ready(message: types.Message):
             first,
             f"{random.choice(START_ATTACKER_LINES)}\n"
             f"⌛ Лимит на ход: {TURN_TIMEOUT_SEC // 60} минут.",
-            parse_mode="HTML",
             reply_markup=kb_menu("PLAYING"),
         )
         await bot.send_message(
             second,
             random.choice(START_DEFENDER_LINES),
-            parse_mode="HTML",
             reply_markup=kb_menu("PLAYING"),
         )
     else:
@@ -725,8 +730,8 @@ async def cmd_ready(message: types.Message):
         )
 
 
-@dp.message_handler(commands=["surrender"])
-async def cmd_surrender(message: types.Message):
+@dp.message(Command("surrender"))
+async def cmd_surrender(message: Message):
     uid = message.from_user.id
     code = user_game.get(uid)
     if not code:
@@ -749,8 +754,8 @@ async def cmd_surrender(message: types.Message):
     await delete_game(code)
 
 
-@dp.message_handler(commands=["chat", "say"])
-async def cmd_chat(message: types.Message):
+@dp.message(Command("chat", "say"))
+async def cmd_chat(message: Message, command: CommandObject):
     uid = message.from_user.id
     code = user_game.get(uid)
     if not code or code not in games:
@@ -760,11 +765,10 @@ async def cmd_chat(message: types.Message):
     if len(game["players"]) < 2:
         await message.reply("Соперник ещё не подключился.")
         return
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
+    text = (command.args or "").strip()
+    if not text:
         await message.reply("Формат: /chat ТВОЁ_СООБЩЕНИЕ")
         return
-    text = parts[1].strip()
     if len(text) > 300:
         await message.reply("Слишком длинно. До 300 символов.")
         return
@@ -773,14 +777,14 @@ async def cmd_chat(message: types.Message):
         return
     opp_id = other(game, uid)
     try:
-        await bot.send_message(opp_id, f"💬 <b>Сообщение от соперника:</b>\n{text}", parse_mode="HTML")
+        await bot.send_message(opp_id, f"💬 <b>Сообщение от соперника:</b>\n{text}")
         await message.reply("✅ Отправлено.")
     except Exception:
         await message.reply("Не удалось отправить сообщение сопернику.")
 
 
-@dp.message_handler()
-async def handle_move(message: types.Message):
+@dp.message()
+async def handle_move(message: Message):
     uid = message.from_user.id
     code = user_game.get(uid)
     if not code:
@@ -790,6 +794,8 @@ async def handle_move(message: types.Message):
         return
     if game["turn"] != uid:
         await message.reply("⏳ Сейчас не твой ход.")
+        return
+    if not message.text:
         return
     move = parse_move(message.text)
     if not move:
@@ -866,7 +872,7 @@ async def handle_move(message: types.Message):
     await send_boards(game, opp_id, random.choice(KILL_DEFENDER_LINES).format(coord=coord_name))
 
 
-async def on_startup(dispatcher):
+async def on_startup() -> None:
     global db_pool, BOT_USERNAME
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     log.info("db pool created")
@@ -879,13 +885,13 @@ async def on_startup(dispatcher):
         log.exception("get_me failed (deep-link invites will not work)")
     try:
         await bot.set_my_commands([
-            types.BotCommand("new", "Создать игру"),
-            types.BotCommand("join", "Войти по коду"),
-            types.BotCommand("replace", "Перекинуть расстановку"),
-            types.BotCommand("ready", "Готов к бою"),
-            types.BotCommand("chat", "Сообщение сопернику"),
-            types.BotCommand("surrender", "Сдаться"),
-            types.BotCommand("help", "Помощь"),
+            BotCommand(command="new", description="Создать игру"),
+            BotCommand(command="join", description="Войти по коду"),
+            BotCommand(command="replace", description="Перекинуть расстановку"),
+            BotCommand(command="ready", description="Готов к бою"),
+            BotCommand(command="chat", description="Сообщение сопернику"),
+            BotCommand(command="surrender", description="Сдаться"),
+            BotCommand(command="help", description="Помощь"),
         ])
     except Exception:
         log.exception("set_my_commands failed (non-fatal)")
@@ -893,20 +899,24 @@ async def on_startup(dispatcher):
         log.info("startup delay %ss to release previous getUpdates session", STARTUP_DELAY_SEC)
         await asyncio.sleep(STARTUP_DELAY_SEC)
     try:
-        await bot.delete_webhook(drop_pending_updates=False)
+        # drop_pending_updates=True заменяет старый skip_updates из executor 2.x
+        await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
         log.exception("delete_webhook failed (non-fatal)")
 
 
-async def on_shutdown(dispatcher):
+async def on_shutdown() -> None:
     if db_pool:
         await db_pool.close()
 
 
+dp.startup.register(on_startup)
+dp.shutdown.register(on_shutdown)
+
+
+async def main() -> None:
+    await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
-    executor.start_polling(
-        dp,
-        skip_updates=True,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-    )
+    asyncio.run(main())

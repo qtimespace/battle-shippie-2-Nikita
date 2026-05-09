@@ -9,21 +9,58 @@ import pytest
 
 
 def _import_bot():
-    """Import bot.py with stubbed aiogram + dummy env so no I/O happens."""
+    """Import bot.py with stubbed aiogram v3 + dummy env so no I/O happens."""
+
+    class _MagicAttr:
+        """Acts as F: any attribute access / comparison returns self,
+        so `F.text == 'x'` evaluates without needing real aiogram filters."""
+        def __getattr__(self, name): return self
+        def __eq__(self, other): return self
+        def __ne__(self, other): return self
+        def __hash__(self): return id(self)
+
+    def _decorator(*a, **k):
+        return lambda f: f
+
+    class _EventHandler:
+        def register(self, *a, **k): return None
+
+    class _Dispatcher:
+        def __init__(self, *a, **k):
+            self.startup = _EventHandler()
+            self.shutdown = _EventHandler()
+        def message(self, *a, **k): return _decorator
+        async def start_polling(self, *a, **k): return None
+
     fake = types.ModuleType("aiogram")
     fake.Bot = lambda **k: None
-    fake.Dispatcher = lambda *a, **k: type("D", (), {
-        "message_handler": lambda *a, **k: (lambda f: f)
-    })()
-    fake.types = types.ModuleType("aiogram.types")
-    fake.types.Message = object
-    fake_utils = types.ModuleType("aiogram.utils")
-    fake_utils.executor = types.ModuleType("aiogram.utils.executor")
-    fake_utils.executor.start_polling = lambda *a, **k: None
+    fake.Dispatcher = _Dispatcher
+    fake.F = _MagicAttr()
     sys.modules.setdefault("aiogram", fake)
-    sys.modules.setdefault("aiogram.types", fake.types)
-    sys.modules.setdefault("aiogram.utils", fake_utils)
-    sys.modules.setdefault("aiogram.utils.executor", fake_utils.executor)
+
+    t = types.ModuleType("aiogram.types")
+    t.Message = object
+    t.BotCommand = lambda **k: None
+    t.KeyboardButton = lambda **k: None
+    t.ReplyKeyboardMarkup = lambda **k: None
+    t.InlineKeyboardButton = lambda **k: None
+    t.InlineKeyboardMarkup = lambda **k: None
+    sys.modules.setdefault("aiogram.types", t)
+
+    sys.modules.setdefault("aiogram.client", types.ModuleType("aiogram.client"))
+    cd = types.ModuleType("aiogram.client.default")
+    cd.DefaultBotProperties = lambda **k: None
+    sys.modules.setdefault("aiogram.client.default", cd)
+
+    en = types.ModuleType("aiogram.enums")
+    en.ParseMode = type("PM", (), {"HTML": "HTML"})
+    sys.modules.setdefault("aiogram.enums", en)
+
+    fl = types.ModuleType("aiogram.filters")
+    fl.Command = lambda *a, **k: None
+    fl.CommandObject = object
+    fl.CommandStart = lambda *a, **k: None
+    sys.modules.setdefault("aiogram.filters", fl)
 
     os.environ.setdefault("BOT_TOKEN", "test")
     os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
